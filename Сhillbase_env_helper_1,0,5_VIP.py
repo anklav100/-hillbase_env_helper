@@ -2,7 +2,7 @@ bl_info = {
     "name": "Сhillbase_env_helper",
     "blender": (4, 0, 0),
     "category": "Object",
-    "version": (1, 0, 4),
+    "version": (1, 0, 5),
     "author": "Golubev_Dmitriy",
     "description": "Addon to help work with chillbase",
 }
@@ -10,7 +10,8 @@ bl_info = {
 import bpy
 import bmesh
 import math
-
+import os
+from mathutils import Vector
 
 # Операция для переноса материалов
 class OBJECT_OT_my_button(bpy.types.Operator):
@@ -238,6 +239,135 @@ class OBJECT_OT_delete_materials(bpy.types.Operator):
         self.report({'INFO'}, "All materials removed from selected objects")
         return {'FINISHED'}
 
+#---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Материалы для назначения
+# Словарь материалов с ключами, представляющими цвета, и их соответствующими названиями в Blender
+materials = {
+    "green": "id100_r_land_02",
+    "red": "id231_stn_03",
+    "blue": "id55_sand_01",
+    "default": "id165_wild_grass_5",
+}
+
+# Переменная для хранения пути к текстурам
+# Создаем свойство сцены для ввода пути к папке с текстурами через UI
+bpy.types.Scene.texture_folder_path = bpy.props.StringProperty(
+    name="Texture Folder",
+    description="Path to the folder with textures",
+    default="",
+    subtype='DIR_PATH'
+)
+
+# Функция для вычисления UDIM на основе UV-координат
+# UDIM - это система, используемая для текстурирования с использованием плиток
+
+def get_udim_from_uv(uv):
+    udim_base = 1001  # Базовый индекс UDIM
+    udim_x = int(uv.x)  # Координата X
+    udim_y = int(uv.y)  # Координата Y
+    return udim_base + udim_x + (udim_y * 10)
+
+# Функция для извлечения UDIM из имени текстуры
+# Например, из имени '1002_BC' будет извлечено 1002
+
+def get_udim_from_texture_name(name):
+    parts = name.split("_")
+    if len(parts) > 0 and parts[0].isdigit():
+        return int(parts[0])
+    return None
+
+# Функция для получения цвета пикселя из текстуры на основе UV-координат
+
+def get_pixel_color(image, uv):
+    x = int(uv.x * image.size[0]) % image.size[0]  # Координата X пикселя
+    y = int(uv.y * image.size[1]) % image.size[1]  # Координата Y пикселя
+    pixel_index = (y * image.size[0] + x) * 4  # Индекс пикселя в массиве
+    return image.pixels[pixel_index:pixel_index + 3]  # Возвращаем только RGB
+
+# Функция для назначения материалов на основе цвета текстуры
+
+def assign_materials_to_mesh(mesh_obj, images_by_udim, material_map):
+    bm = bmesh.new()
+    bm.from_mesh(mesh_obj.data)
+
+    # Получаем второй UV-канал
+    uv_layer = bm.loops.layers.uv.get("UVChannel_2")
+    if not uv_layer:
+        print(f"UVChannel_2 не найден на меше {mesh_obj.name}.")
+        bm.free()
+        return
+
+    # Создаем словарь для быстрого доступа к индексам материалов
+    material_index_map = {key: mesh_obj.data.materials.find(mat.name) for key, mat in material_map.items()}
+
+    # Обрабатываем каждый полигон
+    for face in bm.faces:
+        center_uv = Vector((0.0, 0.0))
+        for loop in face.loops:
+            center_uv += loop[uv_layer].uv
+        center_uv /= len(face.loops)
+
+        udim = get_udim_from_uv(center_uv)
+        image = images_by_udim.get(udim)
+
+        if not image:
+            print(f"Текстура для UDIM {udim} не найдена. Пропуск полигона.")
+            continue
+
+        # Получаем цвет пикселя
+        color = get_pixel_color(image, center_uv)
+        if color[0] > 0.5 and color[1] < 0.5 and color[2] < 0.5:
+            material_key = "red"
+        elif color[0] < 0.5 and color[1] > 0.5 and color[2] < 0.5:
+            material_key = "green"
+        elif color[0] < 0.5 and color[1] < 0.5 and color[2] > 0.5:
+            material_key = "blue"
+        else:
+            material_key = "default"
+
+        # Назначаем материал полигону
+        if material_index_map[material_key] != -1:
+            face.material_index = material_index_map[material_key]
+        else:
+            print(f"Материал '{material_key}' не найден для объекта {mesh_obj.name}.")
+
+    bm.to_mesh(mesh_obj.data)
+    bm.free()
+
+# Функция для назначения текстур на основе UDIM
+
+def assign_textures_to_meshes_from_folder(folder_path):
+    if not os.path.exists(folder_path):
+        print(f"Папка {folder_path} не найдена.")
+        return
+
+    texture_files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.png', '.jpg', '.bmp'))]
+    images_by_udim = {}
+    for texture_file in texture_files:
+        udim = get_udim_from_texture_name(texture_file)
+        if udim:
+            texture_path = os.path.join(folder_path, texture_file)
+            try:
+                image = bpy.data.images.load(texture_path, check_existing=True)
+                images_by_udim[udim] = image
+            except RuntimeError:
+                print(f"Ошибка загрузки текстуры: {texture_path}")
+
+    for obj in bpy.context.selected_objects:
+        if obj.type != 'MESH':
+            continue
+
+        material_map = {}
+        for key, mat_name in materials.items():
+            mat = bpy.data.materials.get(mat_name)
+            if not mat:
+                mat = bpy.data.materials.new(name=mat_name)
+            if mat.name not in [m.name for m in obj.data.materials]:
+                obj.data.materials.append(mat)
+            material_map[key] = mat
+
+        assign_materials_to_mesh(obj, images_by_udim, material_map)
+#---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Панель с кнопками
 class OBJECT_PT_my_panel(bpy.types.Panel):
@@ -250,7 +380,7 @@ class OBJECT_PT_my_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         scene = context.scene
-        
+
         # Пикеры для объектов
         layout.prop(scene, "obj_from", text="Source Object")
         layout.prop(scene, "obj_to", text="Target Object")
@@ -272,8 +402,20 @@ class OBJECT_PT_my_panel(bpy.types.Panel):
         
         # Кнопка для удаления материалов
         layout.operator("object.delete_materials")
+
+        # Кнопка для назначения материалов и путь к текстурам
+        layout.prop(context.scene, "texture_folder_path")
+        layout.operator("object.assign_materials_from_color", text="Assign Materials from Color")
         
-        
+        # Оператор для кнопки
+class OBJECT_OT_AssignMaterials(bpy.types.Operator):
+    bl_idname = "object.assign_materials_from_color"
+    bl_label = "Assign Materials from Color"
+    
+    def execute(self, context):
+        folder_path = context.scene.texture_folder_path
+        assign_textures_to_meshes_from_folder(folder_path)
+        return {'FINISHED'}
 
 # Регистрация классов и свойств
 def register():
@@ -281,10 +423,11 @@ def register():
     bpy.utils.register_class(OBJECT_OT_rename_uv)
     bpy.utils.register_class(OBJECT_OT_rename_vc)
     bpy.utils.register_class(OBJECT_OT_clean_collision)
-    bpy.utils.register_class(OBJECT_PT_my_panel)
     bpy.utils.register_class(OBJECT_OT_long_triangles)
     bpy.utils.register_class(OBJECT_OT_delete_materials)
-    
+    bpy.utils.register_class(OBJECT_OT_AssignMaterials)
+    bpy.utils.register_class(OBJECT_PT_my_panel)
+
     # Свойства для выбора объектов
     bpy.types.Scene.obj_from = bpy.props.PointerProperty(
         type=bpy.types.Object,
@@ -296,6 +439,13 @@ def register():
         name="Target Object",
         description="Object to transfer materials to",
     )
+    bpy.types.Scene.texture_folder_path = bpy.props.StringProperty(
+        name="Texture Folder",
+        description="Path to the folder with textures",
+        default="",
+        subtype='DIR_PATH'
+    )
+
 
 # Удаление классов и свойств при отключении аддона
 def unregister():
@@ -303,12 +453,14 @@ def unregister():
     bpy.utils.unregister_class(OBJECT_OT_rename_uv)
     bpy.utils.unregister_class(OBJECT_OT_rename_vc)
     bpy.utils.unregister_class(OBJECT_OT_clean_collision)
-    bpy.utils.unregister_class(OBJECT_PT_my_panel)
     bpy.utils.unregister_class(OBJECT_OT_long_triangles)
     bpy.utils.unregister_class(OBJECT_OT_delete_materials)
-    
+    bpy.utils.unregister_class(OBJECT_OT_AssignMaterials)
+    bpy.utils.unregister_class(OBJECT_PT_my_panel)
+
     del bpy.types.Scene.obj_from
     del bpy.types.Scene.obj_to
+    del bpy.types.Scene.texture_folder_path
 
 # Точка входа в аддон
 if __name__ == "__main__":
