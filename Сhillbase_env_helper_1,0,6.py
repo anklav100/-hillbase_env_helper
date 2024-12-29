@@ -2,7 +2,7 @@ bl_info = {
     "name": "Сhillbase_env_helper",
     "blender": (4, 0, 0),
     "category": "Object",
-    "version": (1, 0, 5),
+    "version": (1, 0, 6),
     "author": "Golubev_Dmitriy",
     "description": "Addon to help work with chillbase",
 }
@@ -11,6 +11,7 @@ import bpy
 import bmesh
 import math
 import os
+import re
 from mathutils import Vector
 
 # Операция для переноса материалов
@@ -368,7 +369,98 @@ def assign_textures_to_meshes_from_folder(folder_path):
 
         assign_materials_to_mesh(obj, images_by_udim, material_map)
 #---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Функция для назначения материалов на основе альфа-канала
+def assign_materials_based_on_alpha(obj):
+    # Проверяем, является ли объект мешем
+    if obj.type != 'MESH':
+        print(f"Объект {obj.name} не является типом 'MESH'. Пропуск.")
+        return
 
+    # Проверяем, есть ли атрибут цвета
+    if not obj.data.color_attributes:
+        print(f"Объект {obj.name} не имеет атрибутов цвета. Пропуск.")
+        return
+
+    # Переключаем объект в Object Mode, если он в Edit Mode
+    if obj.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    # Получаем первый цветовой слой
+    color_layer_name = obj.data.color_attributes[0].name
+
+    # Работаем с полигонами объекта
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+
+    # Добавляем цветовой слой в BMesh
+    color_layer = bm.loops.layers.color.get(color_layer_name)
+    if not color_layer:
+        print(f"Не удалось найти Color Attribute '{color_layer_name}' в BMesh. Пропуск объекта {obj.name}.")
+        bm.free()
+        return
+
+    # Проверяем, есть ли материалы в объекте
+    materials = obj.data.materials
+    if not materials:
+        print(f"У объекта {obj.name} нет назначенных материалов. Пропуск.")
+        bm.free()
+        return
+
+    # Создаём словарь материалов с ключом, равным ID материала
+    material_map = {}
+    for mat in materials:
+        match = re.match(r"id(\d+)_", mat.name)
+        if match:
+            material_id = int(match.group(1))
+            material_map[material_id] = mat
+
+    if not material_map:
+        print(f"Не удалось найти материалы с корректным форматом имени 'idX_' для объекта {obj.name}. Пропуск.")
+        bm.free()
+        return
+
+    # Назначаем материалы полигонам на основе альфа-канала
+    for face in bm.faces:
+        # Получаем значение альфа-канала из первой вершины (допущение: оно одинаково для всех вершин полигона)
+        alpha_value = face.loops[0][color_layer][3]
+
+        # Вычисляем ближайший материал ID
+        material_id = round(alpha_value / 0.003906)
+
+        # Проверяем, есть ли соответствующий материал
+        if material_id in material_map:
+            face.material_index = materials.find(material_map[material_id].name)
+        else:
+            print(f"Для альфа-значения {alpha_value:.6f} не найден соответствующий материал (ID: {material_id}).")
+
+    # Обновляем меш и освобождаем BMesh
+    bm.to_mesh(obj.data)
+    bm.free()
+
+    print(f"Материалы успешно назначены для объекта {obj.name}.")
+
+
+# Оператор для кнопки
+class OBJECT_OT_AssignMaterialsByAlpha(bpy.types.Operator):
+    bl_idname = "object.assign_materials_by_alpha"
+    bl_label = "Assign materials based on Alpha"
+    bl_description = "Assign materials to selected objects based on alpha channel"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected_objects = context.selected_objects
+        if not selected_objects:
+            self.report({'WARNING'}, "Нет выбранных объектов.")
+            return {'CANCELLED'}
+
+        for obj in selected_objects:
+            assign_materials_based_on_alpha(obj)
+        
+        self.report({'INFO'}, f"Материалы назначены для {len(selected_objects)} объектов.")
+        return {'FINISHED'}
+
+#---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # Панель с кнопками
 class OBJECT_PT_my_panel(bpy.types.Panel):
     bl_label = "Сhillbase env helper"
@@ -401,12 +493,15 @@ class OBJECT_PT_my_panel(bpy.types.Panel):
         layout.operator("object.long_triangles")
         
         # Кнопка для удаления материалов
-        layout.operator("object.delete_materials")
+        layout.operator("object.delete_materials", icon='MATERIAL')
 
         # Кнопка для назначения материалов и путь к текстурам
         layout.prop(context.scene, "texture_folder_path")
-        layout.operator("object.assign_materials_from_color", text="Assign Materials from Color")
+        layout.operator("object.assign_materials_from_color", text="Assign Materials from Color", icon='MATERIAL')
         
+         # Кнопка для назначения материалов из альфы
+        layout.operator("object.assign_materials_by_alpha", icon='MATERIAL')
+
         # Оператор для кнопки
 class OBJECT_OT_AssignMaterials(bpy.types.Operator):
     bl_idname = "object.assign_materials_from_color"
@@ -417,6 +512,7 @@ class OBJECT_OT_AssignMaterials(bpy.types.Operator):
         assign_textures_to_meshes_from_folder(folder_path)
         return {'FINISHED'}
 
+     
 # Регистрация классов и свойств
 def register():
     bpy.utils.register_class(OBJECT_OT_my_button)
@@ -426,6 +522,7 @@ def register():
     bpy.utils.register_class(OBJECT_OT_long_triangles)
     bpy.utils.register_class(OBJECT_OT_delete_materials)
     bpy.utils.register_class(OBJECT_OT_AssignMaterials)
+    bpy.utils.register_class(OBJECT_OT_AssignMaterialsByAlpha)
     bpy.utils.register_class(OBJECT_PT_my_panel)
 
     # Свойства для выбора объектов
@@ -456,6 +553,7 @@ def unregister():
     bpy.utils.unregister_class(OBJECT_OT_long_triangles)
     bpy.utils.unregister_class(OBJECT_OT_delete_materials)
     bpy.utils.unregister_class(OBJECT_OT_AssignMaterials)
+    bpy.utils.unregister_class(OBJECT_OT_AssignMaterialsByAlpha)
     bpy.utils.unregister_class(OBJECT_PT_my_panel)
 
     del bpy.types.Scene.obj_from
